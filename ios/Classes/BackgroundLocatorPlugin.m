@@ -108,7 +108,7 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
                      kArgCallback : @([PreferencesManager getCallbackHandle:kCallbackKey]),
                      kArgLocation: location
                      };
-    [_callbackChannel invokeMethod:kBCMSendLocation arguments:map];
+    [self invokeMethod:kBCMSendLocation arguments:map];
 }
 
 - (instancetype)init:(NSObject<FlutterPluginRegistrar> *)registrar {
@@ -135,6 +135,16 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     if (@available(iOS 9.0, *)) {
         _locationManager.allowsBackgroundLocationUpdates = YES;
     }
+}
+
+- (void)invokeMethod:(NSString*_Nonnull)method arguments:(id _Nullable)arguments {
+    // Return if flutter engine is not ready
+    NSString *isolateId = [_headlessRunner isolateId];
+    if (_callbackChannel == nil || isolateId == nil) {
+        return;
+    }
+    
+    [_callbackChannel invokeMethod:method arguments:arguments];
 }
 
 #pragma mark MethodCallHelperDelegate
@@ -194,7 +204,7 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
                      kArgInitCallback : @([PreferencesManager getCallbackHandle:kInitCallbackKey]),
                      kArgInitDataCallback: initialDataDictionary
                      };
-    [_callbackChannel invokeMethod:kBCMInit arguments:map];
+    [self invokeMethod:kBCMInit arguments:map];
     [_locationManager startUpdatingLocation];
     [_locationManager startMonitoringSignificantLocationChanges];
 }
