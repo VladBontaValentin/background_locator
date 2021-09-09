@@ -2,8 +2,6 @@
 #import "Globals.h"
 #import "Utils/Util.h"
 #import "Preferences/PreferencesManager.h"
-#import "InitPluggable.h"
-#import "DisposePluggable.h"
 
 @implementation BackgroundLocatorPlugin {
     FlutterEngine *_headlessRunner;
@@ -15,7 +13,10 @@
 }
 
 static FlutterPluginRegistrantCallback registerPlugins = nil;
+static BOOL initialized = NO;
+static BOOL observingRegions = NO;
 static BackgroundLocatorPlugin *instance = nil;
+static BOOL isLocationServiceRunning = NO;
 
 #pragma mark FlutterPlugin Methods
 
@@ -32,20 +33,6 @@ static BackgroundLocatorPlugin *instance = nil;
     registerPlugins = callback;
 }
 
-+ (BackgroundLocatorPlugin *) getInstance {
-    return instance;
-}
-
-- (void)invokeMethod:(NSString*_Nonnull)method arguments:(id _Nullable)arguments {
-    // Return if flutter engine is not ready
-    NSString *isolateId = [_headlessRunner isolateId];
-    if (_callbackChannel == nil || isolateId == nil) {
-        return;
-    }
-    
-    [_callbackChannel invokeMethod:method arguments:arguments];
-}
-
 - (void)handleMethodCall:(FlutterMethodCall *)call
                   result:(FlutterResult)result {
     MethodCallHelper *callHelper = [[MethodCallHelper alloc] init];
@@ -60,22 +47,18 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     if (launchOptions[UIApplicationLaunchOptionsLocationKey] != nil) {
         // Restart the headless service.
         [self startLocatorService:[PreferencesManager getCallbackDispatcherHandle]];
-        [PreferencesManager setObservingRegion:YES];
-    } else if([PreferencesManager isObservingRegion]) {
-        [self prepareLocationManager];
-        [self removeLocator];
-        [PreferencesManager setObservingRegion:NO];
-        [_locationManager startUpdatingLocation];
+        observingRegions = YES;
+    } else {
+        if(observingRegions == YES) {
+            [self prepareLocationManager];
+            [self removeLocator];
+            observingRegions = NO;
+            [_locationManager startUpdatingLocation];
+        }
     }
     
     // Note: if we return NO, this vetos the launch of the application.
     return YES;
-}
-
-- (void)applicationDidEnterBackground:(UIApplication *)application {
-    if ([PreferencesManager isServiceRunning]) {
-        [_locationManager startMonitoringSignificantLocationChanges];
-    }
 }
 
 -(void)applicationWillTerminate:(UIApplication *)application {
@@ -96,7 +79,9 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     _lastLocation = location;
     NSDictionary<NSString*,NSNumber*>* locationMap = [Util getLocationMap:location];
     
-    [self sendLocationEvent:locationMap];
+    if (initialized) {
+        [self sendLocationEvent:locationMap];
+    }
 }
 
 #pragma mark LocationManagerDelegate Methods
@@ -105,7 +90,7 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     if (locations.count > 0) {
         CLLocation* location = [locations objectAtIndex:0];
         [self prepareLocationMap: location];
-        if([PreferencesManager isObservingRegion]) {
+        if(observingRegions) {
             [self observeRegionForLocation: location];
             [_locationManager stopUpdatingLocation];
         }
@@ -119,16 +104,11 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
 
 #pragma mark LocatorPlugin Methods
 - (void) sendLocationEvent: (NSDictionary<NSString*,NSNumber*>*)location {
-    NSString *isolateId = [_headlessRunner isolateId];
-    if (_callbackChannel == nil || isolateId == nil) {
-        return;
-    }
-    
     NSDictionary *map = @{
                      kArgCallback : @([PreferencesManager getCallbackHandle:kCallbackKey]),
                      kArgLocation: location
                      };
-    [_callbackChannel invokeMethod:kBCMSendLocation arguments:map];
+    [self invokeMethod:kBCMSendLocation arguments:map];
 }
 
 - (instancetype)init:(NSObject<FlutterPluginRegistrar> *)registrar {
@@ -152,6 +132,19 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     _locationManager = [[CLLocationManager alloc] init];
     [_locationManager setDelegate:self];
     _locationManager.pausesLocationUpdatesAutomatically = NO;
+    if (@available(iOS 9.0, *)) {
+        _locationManager.allowsBackgroundLocationUpdates = YES;
+    }
+}
+
+- (void)invokeMethod:(NSString*_Nonnull)method arguments:(id _Nullable)arguments {
+    // Return if flutter engine is not ready
+    NSString *isolateId = [_headlessRunner isolateId];
+    if (_callbackChannel == nil || isolateId == nil) {
+        return;
+    }
+    
+    [_callbackChannel invokeMethod:method arguments:arguments];
 }
 
 #pragma mark MethodCallHelperDelegate
@@ -177,6 +170,12 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     [_registrar addMethodCallDelegate:self channel:_callbackChannel];
 }
 
+- (void) setInitialized {
+    @synchronized(self) {
+        initialized = YES;
+    }
+}
+
 - (void)registerLocator:(int64_t)callback
            initCallback:(int64_t)initCallback
   initialDataDictionary:(NSDictionary*)initialDataDictionary
@@ -196,56 +195,47 @@ didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
       _locationManager.showsBackgroundLocationIndicator = showsBackgroundLocationIndicator;
     }
     
-    if (@available(iOS 9.0, *)) {
-        _locationManager.allowsBackgroundLocationUpdates = YES;
-    }
-    
     [PreferencesManager saveDistanceFilter:distanceFilter];
 
     [PreferencesManager setCallbackHandle:callback key:kCallbackKey];
-    
-    InitPluggable *initPluggable = [[InitPluggable alloc] init];
-    [initPluggable setCallback:initCallback];
-    [initPluggable onServiceStart:initialDataDictionary];
-    
-    DisposePluggable *disposePluggable = [[DisposePluggable alloc] init];
-    [disposePluggable setCallback:disposeCallback];
-        
+    [PreferencesManager setCallbackHandle:initCallback key:kInitCallbackKey];
+    [PreferencesManager setCallbackHandle:disposeCallback key:kDisposeCallbackKey];
+    NSDictionary *map = @{
+                     kArgInitCallback : @([PreferencesManager getCallbackHandle:kInitCallbackKey]),
+                     kArgInitDataCallback: initialDataDictionary
+                     };
+    [self invokeMethod:kBCMInit arguments:map];
     [_locationManager startUpdatingLocation];
     [_locationManager startMonitoringSignificantLocationChanges];
 }
 
 - (void)removeLocator {
-    if (_locationManager == nil) {
-        return;
-    }
-    
     @synchronized (self) {
-        [_locationManager stopUpdatingLocation];
-        
-        if (@available(iOS 9.0, *)) {
-            _locationManager.allowsBackgroundLocationUpdates = NO;
-        }
-        
-        [_locationManager stopMonitoringSignificantLocationChanges];
-
-        for (CLRegion* region in [_locationManager monitoredRegions]) {
-            [_locationManager stopMonitoringForRegion:region];
+        if(initialized){
+            [_locationManager stopUpdatingLocation];
+            for (CLRegion* region in [_locationManager monitoredRegions]) {
+                [_locationManager stopMonitoringForRegion:region];
+            }
+            NSDictionary *map = @{
+                             kArgDisposeCallback : @([PreferencesManager getCallbackHandle:kDisposeCallbackKey])
+                             };
+            [_callbackChannel invokeMethod:kBCMDispose arguments:map];
         }
     }
-    
-    DisposePluggable *disposePluggable = [[DisposePluggable alloc] init];
-    [disposePluggable onServiceDispose];
+}
+
+- (BOOL)isLocatorRegistered{
+    return initialized;
 }
 
 - (void) setServiceRunning:(BOOL) value {
     @synchronized(self) {
-        [PreferencesManager setServiceRunning:value];
+        isLocationServiceRunning = value;
     }
 }
 
 - (BOOL)isServiceRunning{
-    return [PreferencesManager isServiceRunning];
+    return isLocationServiceRunning;
 }
 
 @end
